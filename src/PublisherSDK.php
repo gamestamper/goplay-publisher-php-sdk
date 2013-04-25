@@ -18,11 +18,12 @@
 
 class PublisherSDK extends SDKComponent {
 
-	private $_token;
+	const allowedFailures = 2;
+	
 	private $_secret;
 	private $_pubId;
 	private $_sessionKey;
-	protected $endpoint;
+	public $endpoint;
 
 	public function __construct($pubId, $secret) {
 		$this->_pubId = $pubId;
@@ -31,19 +32,13 @@ class PublisherSDK extends SDKComponent {
 	}
 
 	public function __get($name) {
-		switch ($name) {
-			case 'pub':
-			case 'publisher':
-				$this->endpoint .= $this->ensureSlash($this->_pubId);
-				return $this;
-				break;
-			case 'endpoint':
-				break;
-			default:
-				$this->endpoint .= $this->ensureSlash($name);
-				return $this;
-				break;
-		}
+		return $this->extendEndpoint($name=='pub' || $name=='publisher' ? $this->_pubId : $name);
+	}
+
+	public function extendEndpoint($endpoint) {
+		$result = new PublisherSDK($this->_pubId,$this->_secret);
+		$result->endpoint = $this->endpoint . $this->ensureSlash($endpoint);
+		return $result;
 	}
 
 	public function __call($name, $arguments) {
@@ -66,41 +61,82 @@ class PublisherSDK extends SDKComponent {
 	}
 
 	public function getToken() {
-		if (!$this->_token && !($this->_token = $this->getTokenFromSession())) {
-			$this->_token = $this->getTokenFromServer();
+		if (!($token = $this->getTokenFromSession())) {
+			$token = $this->getTokenFromServer();
 		}
-		return $this->_token;
+		return $token;
 	}	
 
 	private function makeGraphRequest($params, $method) {
 		$params['access_token'] = $this->getToken();
-		$resp = $this->handleResponse(GraphRequest::create($this->endpoint, $params, $method)->getResponse());
-		$this->endpoint = null;
-		return $resp;
+		$response = $this->handleResponse(GraphRequest::create($this->endpoint, $params, $method)->getResponse());
+		$this->endpoint = '';
+		return $response;
 	}
 
 	private function getTokenFromServer() {
-		return $this->safeArrayGet(
-				$this->handleResponse(
-					GraphRequest::create('oauth/access_token',
-					array(
-						'client_id'=>$this->_pubId,
-						'client_secret'=>$this->_secret,
-						'grant_type'=>'publisher_credentials'
-					))->getResponse())->data,'access_token');
+		$token = $this->safeArrayGet(
+					$this->handleResponse(
+						GraphRequest::create('oauth/access_token',
+						array(
+							'client_id'=>$this->_pubId,
+							'client_secret'=>$this->_secret,
+							'grant_type'=>'publisher_credentials'
+						))->getResponse())->data,'access_token');
+		$_SESSION[$this->_sessionKey] = array('token'=>$token,'failures'=>$this->getTokenFailures());
+		return $token;
 	}
 
 	private function handleResponse($response) {
 		if ($response->error) {
-			throw $response->error;
+			if ($response->error->getCode() == 190) {
+				return $this->retryRequestWithNewToken($response);
+			}
+			else {
+				$this->clearTokenFailures();
+				throw $response->error;
+			}
 		}
+		$this->clearTokenFailures();
 		return $response;
+	}
+	
+	private function retryRequestWithNewToken($response) {
+		$this->failToken();
+		if ($this->getTokenFailures()<=self::allowedFailures) {
+			$request = $response->request;
+			$request->params['access_token'] = $this->getTokenFromServer();
+			return $this->handleResponse($request->getResponse());
+		}
+		throw $response->error;
+	}
+	
+	private function getTokenObjectFromSession() {
+		return $this->safeArrayGet($_SESSION, $this->_sessionKey, array('token'=>null,'failures'=>0));
 	}
 
 	private function getTokenFromSession() {
-		return $this->safeArrayGet($_SESSION, $this->_sessionKey);
+		$token = $this->getTokenObjectFromSession();
+		return $token['token'];
+	}
+	
+	public function failToken() {
+		$tokenObject = $this->getTokenObjectFromSession();
+		$tokenObject['failures']++;
+		$_SESSION[$this->_sessionKey] = $tokenObject;
+	}
+	
+	public function clearTokenFailures() {
+		$tokenObject = $this->getTokenObjectFromSession();
+		$tokenObject['failures'] = 0;
+		$_SESSION[$this->_sessionKey] = $tokenObject;
 	}
 
+	public function getTokenFailures() {
+		$token = $this->getTokenObjectFromSession();
+		return $token['failures'];
+	}
+	
 }
 
 class GraphResponse extends SDKComponent{
@@ -153,13 +189,13 @@ class GraphResponse extends SDKComponent{
 
 class GraphRequest extends SDKComponent {
 
-	const VERSION = '1.0';
+	const VERSION = '1.05';
 
 	public static $CURL_OPTS = array(
 		CURLOPT_CONNECTTIMEOUT => 10,
 		CURLOPT_RETURNTRANSFER => true,
 		CURLOPT_TIMEOUT => 60,
-		CURLOPT_USERAGENT => 'goplay-php-1.0',
+		CURLOPT_USERAGENT => 'goplay-php-1.05',
 	);	
 
 	public $endpoint;
