@@ -17,18 +17,20 @@
  */
 
 class PublisherSDK extends SDKComponent {
-
+	const VERSION = '1.05';
 	const allowedFailures = 2;
 	
 	private $_secret;
 	private $_pubId;
 	private $_sessionKey;
 	public $endpoint;
+	public static $isTest = false;
 
-	public function __construct($pubId, $secret) {
+	public function __construct($pubId, $secret, $isTest = false) {
 		$this->_pubId = $pubId;
 		$this->_secret = $secret;
 		$this->_sessionKey = md5($this->_pubId.'-'.$this->_secret);	
+		self::$isTest = $isTest;
 	}
 
 	public function __get($name) {
@@ -36,7 +38,7 @@ class PublisherSDK extends SDKComponent {
 	}
 
 	public function extendEndpoint($endpoint) {
-		$result = new PublisherSDK($this->_pubId,$this->_secret);
+		$result = new PublisherSDK($this->_pubId, $this->_secret, PublisherSDK::$isTest);
 		$result->endpoint = $this->endpoint . $this->ensureSlash($endpoint);
 		return $result;
 	}
@@ -49,7 +51,7 @@ class PublisherSDK extends SDKComponent {
 				$firstArg = $this->safeArrayGet($arguments, 0);
 				
 				if (is_string($firstArg)) {
-					$this->endpoint = $firstArg;
+					$this->endpoint .= $this->ensureSlash($firstArg);
 					$params = $this->safeArrayGet($arguments, 1);
 					return $this->makeGraphRequest($params, $name);
 				}
@@ -153,8 +155,11 @@ class GraphResponse extends SDKComponent{
 		$this->response = $response;
 		if (isset($response['error'])) {
 			$this->error = new SDKException(
-					'Error in request to '.$this->request->effectiveUrl.': '.$this->safeArrayGet($response['error'], 'message'), 
-					$this->safeArrayGet($response['error'], 'code'));
+					$this->safeArrayGet($response['error'], 'message'), 
+					$this->safeArrayGet($response['error'], 'code'),
+					$this->safeArrayGet($response['error'], 'type'),
+					$this->request->effectiveUrl
+				);
 		}
 		else {
 			$this->data = $this->safeArrayGet($response, 'data', $response);
@@ -189,25 +194,32 @@ class GraphResponse extends SDKComponent{
 
 class GraphRequest extends SDKComponent {
 
-	const VERSION = '1.05';
-
 	public static $CURL_OPTS = array(
 		CURLOPT_CONNECTTIMEOUT => 10,
 		CURLOPT_RETURNTRANSFER => true,
-		CURLOPT_TIMEOUT => 60,
-		CURLOPT_USERAGENT => 'goplay-php-1.05',
+		CURLOPT_TIMEOUT => 60
 	);	
 
 	public $endpoint;
 	public $url;
 	public $params;
 	public $effectiveUrl;
-	public static $graph = 'https://graph.goplay.com';
-
+	private static $graph = 'https://graph.goplay.com';
+	private static $testGraph = 'https://test-graph.goplay.com';
+	
 	public function __construct($endpoint, $params, $method='get') {
 		$this->endpoint = $this->ensureSlash($endpoint);
-		$this->url = self::$graph.$this->endpoint;
+		$this->url = $this->getGraph().$this->endpoint;
 		$this->params = array_merge($params, array('method'=>$method));
+		$this->effectiveUrl = $this->buildEffectiveUrl();
+	}
+	
+	public function getGraph() {
+		return PublisherSDK::$isTest ? self::$testGraph : self::$graph;
+	}
+	
+	private function buildEffectiveUrl() {
+		return $this->effectiveUrl = $this->url.'?'.http_build_query($this->params, null, '&');
 	}
 
 	public function getResponse() {
@@ -224,10 +236,11 @@ class GraphRequest extends SDKComponent {
 		}
 
 		$opts = self::$CURL_OPTS;
+		$opts[CURLOPT_USERAGENT] = 'goplay-php-'.PublisherSDK::VERSION;
 		$opts[CURLOPT_POSTFIELDS] = http_build_query($this->params, null, '&');
 		$opts[CURLOPT_URL] = $this->url;
 
-		$this->effectiveUrl = $this->url.'?'.$opts[CURLOPT_POSTFIELDS];
+		$this->effectiveUrl = $this->buildEffectiveUrl();
 
 		// disable the 'Expect: 100-continue' behaviour. This causes CURL to wait
 		// for 2 seconds if the server does not support this header.
@@ -251,7 +264,7 @@ class GraphRequest extends SDKComponent {
 		}
 
 		if ($result === false) {
-			$e = new SDKException(curl_error($ch), curl_errno($ch), $previous);
+			$e = new SDKException(curl_error($ch), curl_errno($ch), null, $this->effectiveUrl, $previous);
 			curl_close($ch);
 			throw $e;
 		}
@@ -287,4 +300,11 @@ class SDKComponent {
 
 class SDKException extends Exception {
 
+	public $type;
+	public $url;
+	public function __construct($message, $code, $type, $url, $previous = null) {
+		$this->type = $type;
+		$this->url = $url;
+		parent::__construct($message, $code, $previous);
+	}
 }
